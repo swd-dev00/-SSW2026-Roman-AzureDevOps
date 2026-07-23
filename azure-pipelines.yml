@@ -1,0 +1,160 @@
+trigger: none
+
+parameters:
+  - name: generateIsochrones
+    displayName: Generate or complete isochrone grid
+    type: boolean
+    default: true
+
+  - name: executeNotebook
+    displayName: Execute merged notebook
+    type: boolean
+    default: true
+
+pool:
+  name: SPISEA-Linux
+
+variables:
+  persistentRoot: /mnt/ssw2026/project
+  containerImage: amigahub/spisea:v1
+  artifactName: roman-spisea-results
+
+stages:
+  - stage: Validate
+    displayName: Validate environment and data
+    jobs:
+      - job: ValidateEnvironment
+        workspace:
+          clean: outputs
+        steps:
+          - checkout: self
+
+          - bash: |
+              set -euo pipefail
+
+              mkdir -p "$(persistentRoot)/notebooks"
+              mkdir -p "$(persistentRoot)/scripts"
+              mkdir -p "$(persistentRoot)/data"
+              mkdir -p "$(persistentRoot)/isochrones"
+              mkdir -p "$(persistentRoot)/outputs"
+              mkdir -p "$(persistentRoot)/executed"
+
+              cp -R "$(Build.SourcesDirectory)/notebooks/." \
+                "$(persistentRoot)/notebooks/"
+
+              cp -R "$(Build.SourcesDirectory)/scripts/." \
+                "$(persistentRoot)/scripts/"
+            displayName: Sync repository to persistent disk
+
+          - bash: |
+              set -euo pipefail
+
+              docker run --rm \
+                -v "$(persistentRoot):/workspace" \
+                -w /workspace \
+                "$(containerImage)" \
+                python /workspace/scripts/verify_environment.py
+            displayName: Verify SPISEA and Roman filters
+
+          - bash: |
+              set -euo pipefail
+
+              docker run --rm \
+                -v "$(persistentRoot):/workspace" \
+                -w /workspace \
+                "$(containerImage)" \
+                python /workspace/scripts/validate_data.py
+            displayName: Verify workshop data
+
+  - stage: GenerateModels
+    displayName: Generate SPISEA isochrones
+    dependsOn: Validate
+    condition: |
+      and(
+        succeeded(),
+        eq('${{ parameters.generateIsochrones }}', 'true')
+      )
+    jobs:
+      - job: GenerateIsochrones
+        timeoutInMinutes: 0
+        workspace:
+          clean: outputs
+        steps:
+          - checkout: none
+
+          - bash: |
+              set -euo pipefail
+
+              docker run --rm \
+                -v "$(persistentRoot):/workspace" \
+                -w /workspace \
+                "$(containerImage)" \
+                python /workspace/scripts/generate_isochrones.py
+            displayName: Generate missing isochrones
+
+          - bash: |
+              set -euo pipefail
+
+              find "$(persistentRoot)/isochrones" \
+                -type f \
+                -name "*.fits" | wc -l
+
+              du -sh "$(persistentRoot)/isochrones"
+            displayName: Report isochrone status
+
+  - stage: Analyze
+    displayName: Execute advanced notebook
+    dependsOn:
+      - Validate
+      - GenerateModels
+    condition: |
+      and(
+        not(failed()),
+        not(canceled()),
+        eq('${{ parameters.executeNotebook }}', 'true')
+      )
+    jobs:
+      - job: ExecuteNotebook
+        timeoutInMinutes: 0
+        workspace:
+          clean: outputs
+        steps:
+          - checkout: none
+
+          - bash: |
+              set -euo pipefail
+
+              chmod +x "$(persistentRoot)/scripts/run_notebook.sh"
+
+              docker run --rm \
+                -v "$(persistentRoot):/workspace" \
+                -w /workspace \
+                "$(containerImage)" \
+                bash /workspace/scripts/run_notebook.sh
+            displayName: Execute merged notebook
+
+          - bash: |
+              set -euo pipefail
+
+              mkdir -p "$(Build.ArtifactStagingDirectory)"
+
+              cp -R "$(persistentRoot)/executed" \
+                "$(Build.ArtifactStagingDirectory)/"
+
+              cp -R "$(persistentRoot)/outputs" \
+                "$(Build.ArtifactStagingDirectory)/"
+
+              find "$(persistentRoot)/isochrones" \
+                -maxdepth 1 \
+                -type f \
+                -name "*.fits" \
+                -printf "%f\n" \
+                > "$(Build.ArtifactStagingDirectory)/isochrone_manifest.txt"
+            displayName: Stage results
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)
+              artifact: $(artifactName)
+              publishLocation: pipeline
+            displayName: Publish results
