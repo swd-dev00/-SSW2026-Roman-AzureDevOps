@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Scientific data and generated models
+data/*.parquet
+isochrones/
+*.fits
+*.h5
+
+# Generated outputs
+outputs/*
+!outputs/.gitkeep
+executed/*
+!executed/.gitkeep
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
